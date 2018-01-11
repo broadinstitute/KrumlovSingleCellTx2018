@@ -4,3 +4,6 @@ RUN Rscript -e 'library(devtools); devtools::install_github("hms-dbmi/scde", bui
 
 RUN Rscript -e 'library(devtools); devtools::install_github("velocyto-team/velocyto.R");'
 
+RUN Rscript -e 'source("http://bioconductor.org/biocLite.R");library(BiocInstaller); biocLite("knitr")'
+RUN Rscript -e 'source("http://bioconductor.org/biocLite.R");library(BiocInstaller); biocLite("rmarkdown")'
+
