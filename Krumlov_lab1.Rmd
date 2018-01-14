@@ -1,0 +1,295 @@
+---
+title: "SINGLE CELL RNA-SEQ WORKSHOP MODULE 1 (CLUSTERING 2.7K PBMCs)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+The basic goal of almost all single-cell RNA-seq (scRNA-seq) data analysis is to explore heterogeneity in high dimensional space, and identify patterns of variation in cell state and gene networks. There is an array of machine learning and statistical tools that can be applied for this purpose, and covering all of them in one sitting is impossible. For this introductory lab session, we will focus on a rather common task in scRNA-seq analysis - clustering, wherein the goal is to identify discrete groups of cells in the data, where members of a single group share a molecular identity. More formally, if one thinks of each cell's molecular identity as a vector in the high dimensional space of gene expression, the task is one of identifying well-separated "clouds" or "islands" of cells in this space as well as the genes that distinguish them.
+
+Why is this important? There is ample evidence suggesting that cells that differ in molecular characteristics also differ in their function. scRNA-seq thus offers a high-throughput and unbiased approach to discover functional categories of cells. 
+
+For this tutorial, we will be analyzing the a dataset of Peripheral Blood Mononuclear Cells (PBMC) freely available from 10X Genomics, using the Seurat R package (http://satijalab.org/seurat/), a popular and powerful set of tools to conduct scRNA-seq analysis in R. In this dataset, there are 2,700 single cells that were sequenced on the Illumina NextSeq 500. We will cover a commonly used clustering workflow, beginning with data normalization, through dimensionality reduction and clustering, and ending with differential gene expression analysis. It is important to note that clustering, while commonly used, may not always be the most appropriate approach to analyze a given dataset. There are many biological situations where the underlying space of cell states exhibits a more continuous variation rather than a discrete variation (e.g. in the case of development or differentiation). In such circumstances, one might need to pose alternative questions and apply different techniques than the ones introduced here.  
+
+```{r global_options, echo=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=80))
+```
+
+## Read the count matrix and setup the Seurat object
+
+Load necessary packages
+
+```{r, warning=FALSE, message=FALSE}
+library(Seurat)
+library(dplyr)
+library(Matrix)
+```
+
+To preprocess their data, 10X genomics provides a software called `cellranger`. `cellranger` aligns the raw reads and generates count matrices. Seurat's `Read10X` function reads these count matrices in the format that 10X provides.
+
+
+```{r, cache.lazy=FALSE, tidy=TRUE,  tidy.opts=list(width.cutoff=80)}
+# Load the PBMC dataset
+pbmc.data <- Read10X(data.dir = "filtered_gene_bc_matrices/hg19/")
+
+# Examine the memory savings between regular and sparse matrices
+dense.size <- object.size(x = as.matrix(x = pbmc.data))
+dense.size
+```
+
+Seurat stores the count matrix in the sparse format. For matrices where a majority of the entries are zero, which is generally the case for scRNA-seq data (remember dropouts?), it is far more memory efficient to only remember the non-zero entries of the matrix, rather than the entire matrix (which is mostly zeros). This is essentially the basis of the sparse representation, a format that is supported by all programming languages. Notice below how much memory we save due to the sparse format,
+
+```{r, cache.lazy=FALSE}
+sparse.size <- object.size(x = pbmc.data)
+sparse.size
+```
+
+```{r, cache.lazy=FALSE}
+dense.size/sparse.size
+```
+
+As is the case in a general R workflow, we center all our analysis on a single "object", in this case an object of the class Seurat that we will call `pbmc`. This object will contain various "slots" that will store not only the raw input data, but also the results from various computations below. This has the advantage that we do not need to keep track of inidividual variables of interest - they can all be collapsed into a single object as long as these slots are pre-defined. 
+
+```{r, cache.lazy=FALSE}
+# Initialize the Seurat object with the raw (non-normalized data).  Keep all
+# genes expressed in >= 3 cells (~0.1% of the data). Keep all cells with at
+# least 200 detected genes
+pbmc <- CreateSeuratObject(raw.data = pbmc.data, min.cells = 3, min.genes = 200, 
+                           project = "10X_PBMC")
+```
+
+`pbmc@raw.data` is a slot that stores the original gene expression matrix. We can visualize the first 20 rows (genes) and the first 10 columns (cells),
+```{r, cache.lazy=FALSE}
+pbmc@raw.data[1:20,1:10]
+```
+
+## Preprocessing step 1 : Filter out unhealthy cells
+
+The object initialization step above only considered cells that express at least 200 genes. Additionally, we would like to exclude cells that are unhealthy. A common metric to judge this (although by no means the only one ) is the relative expression of mitochondrially derived genes. When the cells apoptose due to stress, their mitochondria becomes leaky and there is widespread RNA-degradation. Thus a relative enrichment of mitochondrially derived genes can be a tell-tale sign of cell stress. Here, we compute the proportion of transcripts that are of mitochondrial origin for every cell (`percent.mito`), and visualize its distribution as a violin plot. We also use the `GenePlot` function to observe how `percent.mito` correlates with other metrics 
+
+```{r, cache.lazy=FALSE, tidy=TRUE, tidy.opts=list(width.cutoff=120), fig.width= 12, fig.height=6.5}
+# The number of genes and UMIs (nGene and nUMI) are automatically calculated
+# for every object by Seurat.  For non-UMI data, nUMI represents the sum of
+# the non-normalized values within a cell We calculate the percentage of
+# mitochondrial genes here and store it in percent.mito using AddMetaData.
+# We use object@raw.data since this represents non-transformed and
+# non-log-normalized counts The % of UMI mapping to MT-genes is a common
+# scRNA-seq QC metric.
+mito.genes <- grep(pattern = "^MT-", x = rownames(x = pbmc@data), value = TRUE)
+percent.mito <- Matrix::colSums(pbmc@raw.data[mito.genes, ])/Matrix::colSums(pbmc@raw.data)
+
+# AddMetaData adds columns to object@meta.data, and is a great place to
+# stash QC stats
+pbmc <- AddMetaData(object = pbmc, metadata = percent.mito, col.name = "percent.mito")
+VlnPlot(object = pbmc, features.plot = c("nGene", "nUMI", "percent.mito"), nCol = 3)
+
+# GenePlot is typically used to visualize gene-gene relationships, but can
+# be used for anything calculated by the object, i.e. columns in
+# object@meta.data, PC scores etc.  Since there is a rare subset of cells
+# with an outlier level of high mitochondrial percentage and also low UMI
+# content, we filter these as well
+par(mfrow = c(1, 2))
+GenePlot(object = pbmc, gene1 = "nUMI", gene2 = "percent.mito")
+GenePlot(object = pbmc, gene1 = "nUMI", gene2 = "nGene")
+```
+
+```{r, cache.lazy=FALSE}
+# We filter out cells that have unique gene counts over 2,500 or less than
+# 200 Note that low.thresholds and high.thresholds are used to define a
+# 'gate' -Inf and Inf should be used if you don't want a lower or upper
+# threshold.
+pbmc <- FilterCells(object = pbmc, subset.names = c("nGene", "percent.mito"), 
+    low.thresholds = c(200, -Inf), high.thresholds = c(2500, 0.05))
+```
+
+## Preprocessing step 2 : Expression normalization
+
+After removing unwanted cells from the dataset, the next step is to normalize the data. By default, Seurat a global-scaling normalization method “LogNormalize” that normalizes the gene expression measurements for each cell by the total expression, multiplies this by a scale factor (10,000 by default), and log-transforms the result. There have been many methods to normalize the data, but this is the simplest and the most intuitive. The division by total expression is done to change all expression counts to a relative measure, since experience has suggested that technical factors (e.g. capture rate, efficiency of RT) are largely responsible for the variation in the number of molecules per cell, although genuine biological factors (e.g. cell cycle stage, cell size) also play a smaller, but non-negligible role. The log-transformation is a commonly used transformation that has many desirable properties, such as variance stabilization (can you think of others?).    
+
+For a recent review on scRNA-seq normalization, see Vallejos et al., _Nature Methods_, 2017.
+
+```{r, cache.lazy=FALSE}
+pbmc <- NormalizeData(object = pbmc, normalization.method = "LogNormalize", 
+                      scale.factor = 10000)
+```
+
+## Preprocessing step 3 : Detection of variable genes
+Feature selection is an important step in any machine learning procedure. In the case of scRNA-seq data, the variation of a majority of genes across cells arises from statistical noise rather than biological factors. Therefore, it becomes important to identify the subset of genes whose variability in the dataset exceeds the background of statistical noise. A number of methods have been proposed for this purpose (see for e.g. Brennecke et al., _Nature Methods_, 2013 or Zeisel et al., _Science_, 2014). These methods propose a null model for the expected variance/dispersion in gene expression as a function of mean expression, and rank genes based on their deviance from this model. Commonly, although not always, spike-in transcripts (e.g. ERCC) are used to estimate the null model.
+
+Seurat provides a way to calculate highly variable genes in a data-driven way, which is useful especially when spike-in transcripts are not available. `FindVariableGenes` calculates the average expression and dispersion for each gene, places these genes into bins, and then calculates a z-score for dispersion within each bin. This helps control for the relationship between variability and average expression. This function is unchanged from (Macosko et al., _Cell_, 2015), but new methods for variable gene expression identification are coming soon. We suggest that users set these parameters to mark visual outliers on the dispersion plot, but the exact parameter settings may vary based on the data type, heterogeneity in the sample, and normalization strategy. The parameters here identify ~2,000 variable genes, and represent typical parameter settings for UMI data that is normalized to a total of 1e4 molecules.
+
+```{r, cache.lazy=FALSE, fig.width=10, fig.height=7}
+pbmc <- FindVariableGenes(object = pbmc, mean.function = ExpMean, dispersion.function = LogVMR, 
+    x.low.cutoff = 0.0125, x.high.cutoff = 3, y.cutoff = 0.5)
+length(x = pbmc@var.genes)
+```
+
+`FindVariableGenes` has a lot of parameters. Find more by typing `help("FindVariableGenes")`
+
+## Preprocessing step 4:  Z-scoring the data and removing unwanted sources of variation
+
+Z-scoring is a common transform to "standardize" the distribution of all features (genes) to mean 0 and variance 1 (_Can you think of why this might be desirable/undesirable?_). Finally, prior to further analysis, we would like to remove unwanted sources of variation from the gene expression matrix.  Seurat uses linear regression to remove unwanted sources of variation that can be specified by the user. In this case, we remove the variation arising from the total number of transcripts detected in each cell `nUMI` and the proportion of mitochondrial transcripts `percent.mito`, 
+
+```{r, cache.lazy=FALSE}
+pbmc <- ScaleData(object = pbmc, vars.to.regress = c("nUMI", "percent.mito"), display.progress = FALSE)
+```
+
+## Perform linear dimensionality reduction using PCA  
+
+Next we perform transform the scaled expression matrix using principal component analysis (PCA). PCA is a statistical procedure that transforms the data linearly into a set of orthogonal, uncorrelated variables (called PCs) that maximally capture the variance in the data (https://en.wikipedia.org/wiki/Principal_component_analysis). Each PC is a linear combination of the underlying features (genes) such that the top PC (PC1) is the direction in gene expression space along which the data is "maximally" spread. PC2 is the direction of maximal spread in the orthogonal space of PC1, and so on. By default, the genes in object@var.genes are used as input to the PCA computation, but can be defined using pc.genes.
+
+```{r, cache.lazy=FALSE}
+pbmc <- RunPCA(object = pbmc, pc.genes = pbmc@var.genes, do.print = TRUE, pcs.print = 1:5, 
+               genes.print = 1)
+```
+
+Examine and visualize PCA results a few different ways. `PrintPCA` prints the genes with maximal weights (positive and negative) along the top PCs. `VizPCA` visualizes the magnitude of the gene weights (or "loadings"). `PCAPlot` plots a scatter of the cells based on their PC values (or "scores"). 
+
+```{r, cache.lazy=FALSE}
+PrintPCA(object = pbmc, pcs.print = 1:5, genes.print = 3, use.full = FALSE)
+VizPCA(object = pbmc, pcs.use = 1:2)
+# Notice how different clusters are quite evident
+PCAPlot(object = pbmc, dim.1 = 1, dim.2 = 2)
+```
+
+```{r, cache.lazy=FALSE}
+# ProjectPCA scores each gene in the dataset (including genes not included
+# in the PCA) based on their correlation with the calculated components.
+# Though we don't use this further here, it can be used to identify markers
+# that are strongly correlated with cellular heterogeneity, but may not have
+# passed through variable gene selection.  The results of the projected PCA
+# can be explored by setting use.full=T in the functions above
+pbmc <- ProjectPCA(object = pbmc, do.print = FALSE)
+```
+
+An essential purpose of performing PCA is to reduce the dimensionality of the data into those components that maximally capture the signal, and not statistical noise that is uncorrelated. We must then select only those PCs that represent genuine variation. How can we do that? One way is to visualize some of the top PCs for the presence of structure. `PCHeatmap` allows for easy exploration of the primary sources of heterogeneity in a dataset, and can be useful when trying to decide which PCs to include for further downstream analyses. Both cells and genes are ordered according to their PCA scores. Setting `cells.use` to a number plots the ‘extreme’ cells on both ends of the spectrum, which dramatically speeds plotting for large datasets. Though clearly a supervised analysis, we find this to be a valuable tool for exploring correlated gene sets.
+
+```{r, cache.lazy=FALSE, fig.width= 10, fig.height= 20}
+PCHeatmap(object = pbmc, pc.use = 1:12, cells.use = 500, do.balanced = TRUE, 
+    label.columns = FALSE, use.full = FALSE)
+```
+
+Another way to determine the number of significant PCs by the PCA Elbow plot, which ranks the variance explained by each PCs from highest to lowest. As successive PCs are included the additional variance explained is marginal. A common practice is to identify the point at which this curve exhibits an "elbow", i.e. inclusion of successive PCs leads to a very small change in the variance. 
+
+```{r, cache.lazy=FALSE}
+PCElbowPlot(object = pbmc)
+```
+
+Based on both approaches, we find that the dataset has 10 significant PCs. The information from the space of 20,000 genes has been reduced to 10 principal components. This is dimensionality reduction! 
+
+## Use statistically significant PCs to identify clusters and visualize them using t-SNE 
+
+There are many methods to identify clusters in the data (e.g. k-means clustering, hierarchical clustering, density clustering). All of them rely on defining a notion of similarity between data points, and using that as a starting point to identify natural groups in the data. Here, we will use Graph-based clustering, which begins by defining a nearest-neighbor graph on the data - each cell is connected to its `S` nearest neighbors in the space of significant PCs. Thus, we build something akin to a Facebook network on cells. Computer scientists have developed a number of efficient algorithms to partition such a graph into clusters. This, essentially, will be our approach to find molecularly similar groups of cells in the data. 
+
+```{r, cache.lazy=FALSE}
+# save.SNN = T saves the SNN so that the clustering algorithm can be rerun
+# using the same graph but with a different resolution value (see docs for
+# full details)
+pbmc <- FindClusters(object = pbmc, reduction.type = "pca", dims.use = 1:10, 
+    resolution = 0.6, print.output = 0, save.SNN = TRUE)
+```
+
+How do we visualize these clusters? There are many approaches, but a commonly used one is to embed the cells into a 2-d map using an algorithm called t-distributed Stochastic Neighbor Embedding (t-SNE) proposed by van der Maaten and Hinton (2008). In t-SNE cells with similar molecular profiles (or similar PCs) are embedded close together, while dissimilar cells are far apart. Note that information regarding the clusters IS NOT used to guide the visualization (which is independently computed). The cluster labels are superimposed on the t-SNE coordinates for a post-hoc visualization,
+
+```{r, cache.lazy=FALSE}
+pbmc <- RunTSNE(object = pbmc, dims.use = 1:10, do.fast = TRUE)
+# note that you can set do.label=T to help label individual clusters
+TSNEPlot(object = pbmc)
+```
+
+Thus, our analysis identifies 
+
+## Finding Cluster-specific markers using differential gene expression
+
+Seurat's `FindMarkers` utility can be used to find markers that are enriched in any given cluster. The function is flexible in that any given cluster can be compared either with all the other clusters, or against a subset of the other clusters. `FindMarkers` has multiple tests for differential expression which can be set with the test.use parameter: Wilcoxon rank-sum test ("wilcox"), ROC test (“roc”), t-test (“t”), LRT test based on zero-inflated data (“bimod”), LRT test based on tobit-censoring models (“tobit”), MAST, which uses generalized linear models (a popular scRNA-seq DE analysis package).
+
+Here, we find markers for cluster 1 using two tests - the Wilcoxon test (default), as well as MAST. See if both give consistent results
+
+```{r, cache.lazy=FALSE, warning=FALSE, message=FALSE}
+# find all markers of cluster 1
+cluster1.markers <- FindMarkers(object = pbmc, ident.1 = 1, min.pct = 0.25)
+print(x = head(x = cluster1.markers, n = 10))
+cluster1.markers.MAST <- FindMarkers(object = pbmc, ident.1 = 1, min.pct = 0.25, test.use = "MAST")
+print(x = head(x = cluster1.markers.MAST, n = 10))
+```
+
+The min.pct argument requires a gene to be detected at a minimum percentage in either of the two groups of cells, and the thresh.test argument requires a gene to be differentially expressed (on average) by some amount between the two groups. You can set both of these to 0, but with a dramatic increase in time - since this will test a large number of genes that are unlikely to be highly discriminatory. As another option to speed up these computations, max.cells.per.ident can be set. This will downsample each identity class to have no more cells than whatever this is set to. While there is generally going to be a loss in power, the speed increases can be significiant and the most highly differentially expressed genes will likely still rise to the top.
+
+Alternatively, we can also find all markers distinguishing cluster 5 from clusters 0 and 3
+```{r, cache.lazy=FALSE, warning=FALSE, message=FALSE}
+cluster5.markers <- FindMarkers(object = pbmc, ident.1 = 5, ident.2 = c(0, 3), 
+    min.pct = 0.25)
+print(x = head(x = cluster5.markers, n = 5))
+```
+
+### Finding Cluster-specific markers for all clusters
+
+```{r, cache.lazy=FALSE, warning=FALSE, message=FALSE}
+# find markers for every cluster compared to all remaining cells, report
+# only the positive ones
+pbmc.markers <- FindAllMarkers(object = pbmc, only.pos = TRUE, min.pct = 0.25, 
+    thresh.use = 0.25)
+pbmc.markers %>% group_by(cluster) %>% top_n(2, avg_logFC)
+```
+
+Seurat includes several tools for visualizing marker expression. VlnPlot (shows expression probability distributions across clusters), and FeaturePlot (visualizes gene expression on a tSNE or PCA plot) are our most commonly used visualizations. Also try using JoyPlot, CellPlot, and DotPlot as additional methods to view your dataset.
+
+```{r, cache.lazy=FALSE, fig.width=10}
+VlnPlot(object = pbmc, features.plot = c("MS4A1", "CD79A"))
+# Plot raw umi counts
+VlnPlot(object = pbmc, features.plot = c("MS4A1", "CD79A"), use.raw = TRUE, y.log = TRUE)
+```
+
+```{r, cache.lazy=FALSE, fig.width=20, fig.height=20}
+FeaturePlot(object = pbmc, features.plot = c("MS4A1", "GNLY", "CD3E", "CD14", 
+    "FCER1A", "FCGR3A", "LYZ", "PPBP", "CD8A"), cols.use = c("grey", "blue"), 
+    reduction.use = "tsne")
+```
+
+```{r, cache.lazy=FALSE, fig.width=10, fig.height=6}
+DotPlot(object = pbmc, genes.plot = c("MS4A1", "GNLY", "CD3E", "CD14", 
+    "FCER1A", "FCGR3A", "LYZ", "PPBP", "CD8A"), plot.legend = TRUE)
+```
+
+### Visualize a heatmap of markers
+`DoHeatmap` generates an expression heatmap for given cells and genes. In this case, we are plotting the top 20 markers (or all markers if less than 20) for each cluster.
+
+```{r, cache.lazy=FALSE, fig.width=20, fig.height=15}
+top10 <- pbmc.markers %>% group_by(cluster) %>% top_n(10, avg_logFC)
+# setting slim.col.label to TRUE will print just the cluster IDS instead of
+# every cell name
+DoHeatmap(object = pbmc, genes.use = top10$gene, slim.col.label = TRUE, remove.key = TRUE)
+```
+
+Based on the key markers and a wealth of existing knowledge on cell types in the blood, we can assign each cluster a biological name:
+
+```{r table1, comment=NA, results='asis', echo=F}
+library(xtable)
+df = data.frame(ClusterID = c(0:7), Markers = c("IL7R","CD14, LYZ", "MS4A1","CD8A",
+                                                "FCGR3A, MS4A7", "GNLY, NKG7", "FCER1A, CST3", "PPBP"),
+                CellType = c("CD4 T cells", "CD14+ Monocytes", "B cells", "CD8 T cells", "FCGR3A+ Monocytes", 
+                             "NK cells" , "Dendritic Cells",  "Megakaryocytes"))
+print(xtable(df, align = c("clll")), type = "html", include.rownames = F)
+```
+
+Label each cell type and visualize on the t-SNE map
+
+```{r, cache.lazy=FALSE, fig.width=10, fig.height=8}
+current.cluster.ids <- c(0, 1, 2, 3, 4, 5, 6, 7)
+new.cluster.ids <- c("CD4 T cells", "CD14+ Monocytes", "B cells", "CD8 T cells", 
+    "FCGR3A+ Monocytes", "NK cells", "Dendritic cells", "Megakaryocytes")
+pbmc@ident <- plyr::mapvalues(x = pbmc@ident, from = current.cluster.ids, to = new.cluster.ids)
+TSNEPlot(object = pbmc, do.label = TRUE, pt.size = 0.5)
+```
+
+## Robustness analysis
+An important aspect of any data analysis task is the choice of parameters. If you go back and observe each step, you will notice that at every stage we have chosen some parameters. Some examples include cutoffs such as `x.low.cutoff` and `y.cutoff` in `FindVariableGenes`, the choice of the number of PCs for clustering and visualization etc. It is critical to always go back and examine whether any of our results are sensitive to these parameters. 
+
+1. Check if selecting more or less variable genes, or the number of PCs changes the clustering output.
+2. Vary `resolution` parameter in FindClusters. Do higher values of this parameters produce more or fewer clusters?
+3. How would you go about selecting the appropriate number of clusters in your data?

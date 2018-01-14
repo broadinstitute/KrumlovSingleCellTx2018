@@ -1,0 +1,184 @@
+---
+title: "SINGLE CELL RNA-SEQ WORKSHOP MODULE 2 (CLUSTERING 8K Retinal Bipolar Cells)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Hopefully, following the Seurat workflow on clustering 2.7K bcs has given you a "feel" for what scRNA-seq analysis entails. In this tutorial, we will be analyzing the a slightly larger dataset of Retinal Bipolar Cells (BCs) sequenced using the Drop-seq method from the publication Shekhar et al., _Cell_, 2016 (a copy of which has been made available to you). We will use the Seurat package, and follow roughly the same steps that were applied for pbmcs in the earlier tutorial. Retinal Bipolar Cells are a heterogenous class of interneurons in the retina involved in the processing of visual signals. In the paper, the authors identified 15 molecularly distinct types of bipolar neurons, and matched them against cell morphology. The paper identified all 12 types of bipolar neurons that had been described earlier, in addition to three novel types. 
+
+The original publication began with nearly 44000 cells, of which ~28,000 cells passed QC and featured in the final analysis. In this dataset, you will begin with 8000 cells. I have indicated some key steps below, but your task is to carve out your own analysis path and compare results against those reported in the paper. Even though the figures might look different because of the small size of the dataset and the different methods used here compared to those in the paper, ask yourself if you are able to recover cell types with similar molecular signatures. You are encouraged (although not obligated) to work in groups. 
+
+```{r global_options, echo=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=80))
+```
+
+## Read the count matrix and setup the Seurat object
+
+Load necessary packages
+
+```{r, warning=FALSE, message=FALSE}
+library(Seurat)
+library(dplyr)
+library(Matrix)
+library(MASS)
+source("utilities.R")
+```
+
+Load the data matrix
+
+```{r, cache.lazy=FALSE, tidy=TRUE,  tidy.opts=list(width.cutoff=80)}
+# Load the bc dataset (loads a sparse matrix Count.mat)
+load("bipolar8000.Rdata")
+
+```
+
+Initialize a Seurat Object
+
+```{r, cache.lazy=FALSE}
+# Initialize the Seurat object with the raw (non-normalized data).  Keep all
+# genes expressed in >= 10 cells. Keep all cells with at
+# least 500 detected genes
+bc <- CreateSeuratObject(raw.data = Count.mat, min.cells = 10, min.genes = 500, 
+                           project = "Dropseq_bipolar")
+```
+
+As before, `bc@raw.data` is a slot that stores the original gene expression matrix. We can visualize the first 20 rows (genes) and the first 10 columns (cells),
+```{r, cache.lazy=FALSE}
+bc@raw.data[1:20,1:10]
+```
+
+## Preprocessing step 1 : Filter out unhealthy cells
+
+Following the same procedure as before, we compute `percent.mito` for each cell. Note that the search string input to the `grep` function below is slightly modified to accomodate mouse gene names.
+
+```{r, cache.lazy=FALSE, tidy=TRUE, tidy.opts=list(width.cutoff=120), fig.width= 12, fig.height=6.5}
+# The number of genes and UMIs (nGene and nUMI) are automatically calculated
+# for every object by Seurat.  For non-UMI data, nUMI represents the sum of
+# the non-normalized values within a cell We calculate the percentage of
+# mitochondrial genes here and store it in percent.mito using AddMetaData.
+# We use object@raw.data since this represents non-transformed and
+# non-log-normalized counts The % of UMI mapping to mt-genes is a common
+# scRNA-seq QC metric.
+mito.genes <- grep(pattern = "^mt-", x = rownames(x = bc@data), value = TRUE)
+percent.mito <- Matrix::colSums(bc@raw.data[mito.genes, ])/Matrix::colSums(bc@raw.data)
+
+# AddMetaData adds columns to object@meta.data, and is a great place to
+# stash QC stats
+bc <- AddMetaData(object = bc, metadata = percent.mito, col.name = "percent.mito")
+VlnPlot(object = bc, features.plot = c("nGene", "nUMI", "percent.mito"), nCol = 3)
+
+# GenePlot is typically used to visualize gene-gene relationships, but can
+# be used for anything calculated by the object, i.e. columns in
+# object@meta.data, PC scores etc.  Since there is a rare subset of cells
+# with an outlier level of high mitochondrial percentage and also low UMI
+# content, we filter these as well
+par(mfrow = c(1, 2))
+GenePlot(object = bc, gene1 = "nUMI", gene2 = "percent.mito")
+GenePlot(object = bc, gene1 = "nUMI", gene2 = "nGene")
+```
+
+Filter out cells with fewer than 500 genes detected and `percent.mito` higher than 0.1 (10%),
+
+```{r, cache.lazy=FALSE}
+bc <- FilterCells(object = bc, subset.names = c("nGene", "percent.mito"), 
+    low.thresholds = c(500, -Inf), high.thresholds = c(2500, 0.1))
+print(dim(bc@data))
+```
+
+We see that we are left with 6154 cells. Normalize the data as before,
+
+Normalize the data. After removing unwanted cells from the dataset, the next step is to normalize the data. By default, we employ a global-scaling normalization method “LogNormalize” that normalizes the gene expression measurements for each cell by the total expression, multiplies this by a scale factor equal to the median counts of all genes, and log-transforms the result.
+```{r, cache.lazy=FALSE}
+med_trans = median(Matrix::colSums(bc@raw.data[,bc@cell.names]))
+med_trans
+bc <- NormalizeData(object = bc, normalization.method = "LogNormalize", 
+                      scale.factor = med_trans)
+```
+
+## Detection of variable genes
+
+```{r, cache.lazy=FALSE}
+var.genes.NB <- NB.var.genes(bc, do.idents = FALSE, set.var.genes = FALSE, num.sd=1, x.high.cutoff = 15, x.low.cutoff = 0.005)
+var.genes.Seurat <- FindVariableGenes(object = bc, mean.function = ExpMean, dispersion.function = LogVMR, x.low.cutoff = 0.0125, x.high.cutoff = 3, y.cutoff = 0.5, set.var.genes = FALSE)
+print(length(var.genes.NB))
+print(length(var.genes.Seurat))
+print(length(intersect(var.genes.NB, var.genes.Seurat)))
+```
+
+Set var genes
+
+```{r, cache.lazy=FALSE}
+bc@var.genes = var.genes.NB
+```
+
+## Z-scoring the data and removing unwanted sources of variation
+Seurat uses linear regression to remove unwanted sources of variation that can be specified by the user. 
+```{r, cache.lazy=FALSE}
+bc <- ScaleData(object = bc, vars.to.regress = c("nUMI","percent.mito"), genes.use = bc@var.genes)
+```
+## Perform linear dimensionality reduction using PCA  
+Next we perform PCA on the scaled data. By default, the genes in object@var.genes are used as input, but can be defined using pc.genes.
+```{r, cache.lazy=FALSE}
+bc <- RunPCA(object = bc, pc.genes = bc@var.genes, do.print = TRUE, pcs.print = 1:5, 
+               genes.print = 5, pcs.compute = 50)
+
+# Examine and visualize PCA results a few different ways
+PrintPCA(object = bc, pcs.print = 1:5, genes.print = 5, use.full = FALSE)
+VizPCA(object = bc, pcs.use = 1:2)
+PCAPlot(object = bc, dim.1 = 1, dim.2 = 2)
+```
+
+`PCHeatmap` allows for easy exploration of the primary sources of heterogeneity in a dataset, and can be useful when trying to decide which PCs to include for further downstream analyses. Both cells and genes are ordered according to their PCA scores. Setting cells.use to a number plots the ‘extreme’ cells on both ends of the spectrum, which dramatically speeds plotting for large datasets. Though clearly a supervised analysis, we find this to be a valuable tool for exploring correlated gene sets.
+```{r, cache.lazy=FALSE, fig.width= 10, fig.height= 20}
+PCHeatmap(object = bc, pc.use = 1:12, cells.use = 500, do.balanced = TRUE, 
+    label.columns = FALSE, use.full = FALSE)
+```
+
+Determining number of significant PCs by the PCA Elbow plot
+```{r, cache.lazy=FALSE}
+PCElbowPlot(object = bc, num.pc = 30)
+```
+
+Determine clusters based on graph clustering
+
+```{r, cache.lazy=FALSE}
+# save.SNN = T saves the SNN so that the clustering algorithm can be rerun
+# using the same graph but with a different resolution value (see docs for
+# full details)
+bc <- FindClusters(object = bc, reduction.type = "pca", dims.use = 1:25, 
+    resolution = 0.5, print.output = 0, save.SNN = TRUE, force.recalc = TRUE)
+```
+
+Visualize the clusters using t-SNE
+
+```{r, cache.lazy=FALSE}
+bc <- RunTSNE(object = bc, dims.use = 1:25, do.fast = TRUE)
+# note that you can set do.label=T to help label individual clusters
+TSNEPlot(object = bc)
+```
+
+### Finding Cluster-specific markers for all clusters
+
+```{r, cache.lazy=FALSE, warning=FALSE, message=FALSE}
+# find markers for every cluster compared to all remaining cells, report
+# only the positive ones
+bc.markers <- FindAllMarkers(object = bc, only.pos = TRUE, min.pct = 0.25, 
+    thresh.use = 0.25)
+bc.markers %>% group_by(cluster) %>% top_n(4, avg_logFC)
+```
+
+### Visualize a heatmap of markers
+`DoHeatmap` generates an expression heatmap for given cells and genes. In this case, we are plotting the top 20 markers (or all markers if less than 20) for each cluster.
+
+```{r, cache.lazy=FALSE, fig.width=20, fig.height=15}
+top10 <- bc.markers %>% group_by(cluster) %>% top_n(10, avg_logFC)
+# setting slim.col.label to TRUE will print just the cluster IDS instead of
+# every cell name
+DoHeatmap(object = bc, genes.use = top10$gene, slim.col.label = TRUE, remove.key = TRUE)
+```
