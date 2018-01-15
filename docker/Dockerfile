@@ -15,14 +15,17 @@ RUN Rscript -e 'library(devtools); install_github("satijalab/seurat", ref = "dev
 
 RUN Rscript -e 'source("http://bioconductor.org/biocLite.R");library(BiocInstaller); biocLite("MAST")'
 
-# replace old workshop material with new material:
+# replace old workshop material with new material: (step 1)
 
 RUN rm -rf /home/training/sc_workshop
-RUN git clone https://github.com/broadinstitute/KrumlovSingleCellTx2018.git /home/training/sc_workshop
-RUN chown -R training /home/training/sc_workshop
 
 RUN Rscript -e 'source("http://bioconductor.org/biocLite.R");library(BiocInstaller); biocLite("topGO")'
 
 RUN Rscript -e 'source("http://bioconductor.org/biocLite.R");library(BiocInstaller); biocLite("Org.Mm.eg.db")'
 
 RUN Rscript -e 'source("http://bioconductor.org/biocLite.R");library(BiocInstaller); biocLite("Org.Hs.eg.db")'
+
+# replace old workshop material with new material: (step 2)
+
+RUN git clone https://github.com/broadinstitute/KrumlovSingleCellTx2018.git /home/training/sc_workshop
+RUN chown -R training /home/training/sc_workshop
