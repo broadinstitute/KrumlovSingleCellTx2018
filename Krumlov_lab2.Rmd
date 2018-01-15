@@ -91,9 +91,7 @@ bc <- FilterCells(object = bc, subset.names = c("nGene", "percent.mito"),
 print(dim(bc@data))
 ```
 
-We see that we are left with 6154 cells. Normalize the data as before,
-
-Normalize the data. After removing unwanted cells from the dataset, the next step is to normalize the data. By default, we employ a global-scaling normalization method “LogNormalize” that normalizes the gene expression measurements for each cell by the total expression, multiplies this by a scale factor equal to the median counts of all genes, and log-transforms the result.
+We see that we are left with 6154 cells. Normalize the data as before, using “LogNormalize”, which normalizes the gene expression measurements for each cell by the total expression, multiplies this by a scale factor equal to the median counts of all genes, and log-transforms the result.
 ```{r, cache.lazy=FALSE}
 med_trans = median(Matrix::colSums(bc@raw.data[,bc@cell.names]))
 med_trans
@@ -103,15 +101,22 @@ bc <- NormalizeData(object = bc, normalization.method = "LogNormalize",
 
 ## Detection of variable genes
 
+In this exercise, we will use an alternative method to compute variable genes than the one in Seurat. This is implemented in the `NB.var.genes` function. Briefly, it uses a Negative Binomial Model (more precisely, a Poisson-Gamma mixture) to estimate a lower bound for the coefficient of variation of any gene (CV, defined as the ratio of the standard deviation and the mean) as a function of the mean (the "null" model). This null model describes the minimum CV that would be exhibited by any gene based on statistical noise alone. Thus, this model provides a rational means to rank genes based on their "excess" CV from the null model,
+
 ```{r, cache.lazy=FALSE}
 var.genes.NB <- NB.var.genes(bc, do.idents = FALSE, set.var.genes = FALSE, num.sd=1, x.high.cutoff = 15, x.low.cutoff = 0.005)
+```
+
+We can also compute variable genes using Seurat's `FindVariableGenes` method as before. Let's compare the output of the two different methods? 
+
+```{r, cache.lazy=FALSE}
 var.genes.Seurat <- FindVariableGenes(object = bc, mean.function = ExpMean, dispersion.function = LogVMR, x.low.cutoff = 0.0125, x.high.cutoff = 3, y.cutoff = 0.5, set.var.genes = FALSE)
 print(length(var.genes.NB))
 print(length(var.genes.Seurat))
 print(length(intersect(var.genes.NB, var.genes.Seurat)))
 ```
 
-Set var genes
+We have to set the variable genes to proceed. I'm partial to my method, so I'm following with that. But you should feel free to use either of the two set of variable genes, their union or their intersection (or a completely different method). Feel free to explore!  
 
 ```{r, cache.lazy=FALSE}
 bc@var.genes = var.genes.NB
@@ -155,7 +160,7 @@ bc <- FindClusters(object = bc, reduction.type = "pca", dims.use = 1:25,
     resolution = 0.5, print.output = 0, save.SNN = TRUE, force.recalc = TRUE)
 ```
 
-Visualize the clusters using t-SNE
+How many clusters does this yield? (check `bc@ident`). Visualize the clusters using t-SNE
 
 ```{r, cache.lazy=FALSE}
 bc <- RunTSNE(object = bc, dims.use = 1:25, do.fast = TRUE)
@@ -173,6 +178,8 @@ bc.markers <- FindAllMarkers(object = bc, only.pos = TRUE, min.pct = 0.25,
 bc.markers %>% group_by(cluster) %>% top_n(4, avg_logFC)
 ```
 
+Check out Fig. 1F in Shekhar et al., 2016. Are you able to distinguish clusters corresponding to bipolar neurons vs. those corresponding to non-bipolar neurons? (Hint: Bipolar cells were enriched in this study using a transgenic line that expresses GFP driven by a transgene corresponding to the marker _Vsx2_)
+
 ### Visualize a heatmap of markers
 `DoHeatmap` generates an expression heatmap for given cells and genes. In this case, we are plotting the top 20 markers (or all markers if less than 20) for each cluster.
 
@@ -181,4 +188,19 @@ top10 <- bc.markers %>% group_by(cluster) %>% top_n(10, avg_logFC)
 # setting slim.col.label to TRUE will print just the cluster IDS instead of
 # every cell name
 DoHeatmap(object = bc, genes.use = top10$gene, slim.col.label = TRUE, remove.key = TRUE)
+```
+
+Check out Figs. 2A, 3A and 4A? How do the clusters you obtain correspond to the 15 Bipolar Neuronal types published in the study? Also, how do these results compare to Fig. S2N, where they authors performed a clustering on a 5000 cell subsample? Can you see some similarities in the results? 
+
+Lastly, let us perform a GO analysis of the cell type specific genes to see what's enriched.
+
+```{r, cache.lazy=FALSE, warning=FALSE, message=FALSE}
+bc.cell.type.genes <- unique(bc.markers$gene) # Takes all the unique cell type specific genes
+GOterms.bc = topGOterms(fg.genes = bc.cell.type.genes, bg.genes = rownames(bc@data), organism = "Mouse")
+```
+
+Examine the GO table to see if there's anything that's retina specific? How are these different from the terms you saw in the PBMC example?
+
+```{r, cache.lazy=FALSE, }
+GOterms.bc$res.table
 ```

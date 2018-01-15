@@ -28,6 +28,7 @@ Load necessary packages
 library(Seurat)
 library(dplyr)
 library(Matrix)
+source("utilities.R")
 ```
 
 To preprocess their data, 10X genomics provides a software called `cellranger`. `cellranger` aligns the raw reads and generates count matrices. Seurat's `Read10X` function reads these count matrices in the format that 10X provides.
@@ -202,7 +203,7 @@ pbmc <- RunTSNE(object = pbmc, dims.use = 1:10, do.fast = TRUE)
 TSNEPlot(object = pbmc)
 ```
 
-Thus, our analysis identifies 
+Thus, our analysis identifies 8 clusters. 
 
 ## Finding Cluster-specific markers using differential gene expression
 
@@ -287,9 +288,22 @@ pbmc@ident <- plyr::mapvalues(x = pbmc@ident, from = current.cluster.ids, to = n
 TSNEPlot(object = pbmc, do.label = TRUE, pt.size = 0.5)
 ```
 
+Lastly, let us perform a Gene Ontology (GO) analysis of the cell type specific genes to see what's enriched. We will use the R package `topGO`, and I have provided a wrapper function `topGOterms` for this purpose, which takes in a foreground set of genes `fg.genes` (in our case, this is the cluster specific marker genes), a background set of genes `bg.genes` (all expressed genes), and the species in question ("Human" or "Mouse") to conduct an enrichment analysis of key biological terms as defined and annotated in the Gene Ontology database. 
+
+```{r, cache.lazy=FALSE, warning=FALSE, message=FALSE}
+pbmc.cell.type.genes <- unique(pbmc.markers$gene) # Takes all the unique cell type specific genes
+GOterms.pbmc = topGOterms(fg.genes = pbmc.cell.type.genes, bg.genes = rownames(pbmc@data), organism = "Human")
+```
+
+Examine the GO table to see if which biological processes are enriched in these genes? Do they line with your expectation?
+
+```{r, cache.lazy=FALSE, }
+GOterms.pbmc$res.table
+```
+
 ## Robustness analysis
 An important aspect of any data analysis task is the choice of parameters. If you go back and observe each step, you will notice that at every stage we have chosen some parameters. Some examples include cutoffs such as `x.low.cutoff` and `y.cutoff` in `FindVariableGenes`, the choice of the number of PCs for clustering and visualization etc. It is critical to always go back and examine whether any of our results are sensitive to these parameters. 
 
-1. Check if selecting more or less variable genes, or the number of PCs changes the clustering output.
+1. Check if selecting more or less variable genes, or the number of PCs changes the clustering output. What happens when you select too many variable genes (~8000 genes) or too few (~50)? 
 2. Vary `resolution` parameter in FindClusters. Do higher values of this parameters produce more or fewer clusters?
 3. How would you go about selecting the appropriate number of clusters in your data?
