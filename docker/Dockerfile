@@ -29,3 +29,6 @@ RUN Rscript -e 'source("http://bioconductor.org/biocLite.R");library(BiocInstall
 
 RUN git clone https://github.com/broadinstitute/KrumlovSingleCellTx2018.git /home/training/sc_workshop
 RUN chown -R training /home/training/sc_workshop
+
+
+RUN Rscript -e 'source("http://bioconductor.org/biocLite.R");library(BiocInstaller); biocLite("xtable")'
